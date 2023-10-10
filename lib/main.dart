@@ -1,15 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show DeviceOrientation, SystemChrome, rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'dart:io';
 import 'package:camera/camera.dart';
+import 'package:image/image.dart' as img;
+import 'dart:typed_data';
+import 'package:path_provider/path_provider.dart'; // path_provider 패키지 임포트
+import 'package:flutter_exif_rotation/flutter_exif_rotation.dart';
 
 void main() async {
+
+
   WidgetsFlutterBinding.ensureInitialized();
+  // await SystemChrome.setPreferredOrientations([
+  //   DeviceOrientation.portraitUp,
+  //   DeviceOrientation.portraitDown,
+  // ]);
   final cameras = await availableCameras();
   final firstCamera = cameras.first;
+
 
   runApp(MyApp(camera: firstCamera));
 }
@@ -21,6 +33,7 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     return MaterialApp(
       home: MyHomePage(camera: camera),
     );
@@ -41,6 +54,7 @@ class _MyHomePageState extends State<MyHomePage> {
   CameraController? _controller;
   Future<void>? _initializeControllerFuture;
   File? selectedImage;
+  File? selectedImage2;
   String buttonText = '샤프코드 스캔';
 
   _MyHomePageState({required this.camera});
@@ -64,13 +78,29 @@ class _MyHomePageState extends State<MyHomePage> {
     super.dispose();
   }
 
+/// 샤프코드 API 호출
   Future<String?> callFastAPI() async {
+
+    final croppedImage = await cropImage(selectedImage!.path, 1.0);//aspectRatio);
     if (selectedImage == null) {
       return '이미지를 선택하세요.';
     }
 
+    if (croppedImage != null) {
+      final byteData = ByteData.sublistView(Uint8List.fromList(img.encodeJpg(croppedImage)));
+      final buffer = byteData.buffer.asUint8List();
+      final tempDir = await getTemporaryDirectory();
+      final tempFile = await File('${tempDir.path}/cropped_image.jpg').writeAsBytes(buffer);
+
+      selectedImage2 = tempFile;
+    } else {
+      print('이미지 잘라내기 실패: 이미지를 읽을 수 없습니다.');
+    }
+
     var url = Uri.parse('http://shafcode.iptime.org:1210/shafcode1');
-    var imageFile = selectedImage!;
+    var imageFile = selectedImage2!;
+    var selectedImagePath = selectedImage2!.path;
+
     String fileName = imageFile.path.split('/').last;
 
     var request = http.MultipartRequest('POST', url)
@@ -139,9 +169,11 @@ class _MyHomePageState extends State<MyHomePage> {
           setState(() {
             selectedImage = File(pickedFile.path);
             buttonText = '샤프코드 스캔';
+            imagePath = selectedImage!.path; // 이미지 경로 설정
           });
 
-          await uploadImage(selectedImage!.path);
+          //await fixAndSaveImage(selectedImage!.path); // 이미지 방향 고정 및 저장
+          await uploadImage(selectedImage!.path); // 이미지를 API로 업로드
         }
       } else if (status.isPermanentlyDenied) {
         openAppSettings();
@@ -150,6 +182,23 @@ class _MyHomePageState extends State<MyHomePage> {
       print('이미지 선택 오류: $e');
     }
   }
+
+  Future<void> fixAndSaveImage(String imagePath) async {
+    try {
+      final originalImage = File(imagePath);
+
+      final fixedImage = await FlutterExifRotation.rotateImage(path: imagePath);
+
+
+      await fixedImage.writeAsBytes(await fixedImage.readAsBytes());
+
+      print('이미지 방향을 고정하고 저장했습니다.');
+    } catch (e) {
+      print('이미지 방향 수정 및 저장 중 오류 발생: $e');
+    }
+  }
+
+
 
   Future<String> uploadImage(String imagePath) async {
     var url = Uri.parse('http://shafcode.iptime.org:1210/shafcode1');
@@ -172,7 +221,39 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  // 이미지의 가로 세로 사이즈 알아내는 함수
+  Future<img.Image> getImageSize(String imagePath) async {
+    final file = File(imagePath);
+    final bytes = await file.readAsBytes();
+    final decodedImage = img.decodeImage(bytes);
+
+    if (decodedImage != null) {
+      return decodedImage;
+    } else {
+      throw Exception('이미지를 읽을 수 없습니다.');
+    }
+  }
+
+
+  // 이미지를 원하는 비율로 자르는 함수
+  Future<img.Image?> cropImage(String imagePath, double aspectRatio) async {
+    final file = File(imagePath);
+    final bytes = await file.readAsBytes();
+    final decodedImage = img.decodeImage(bytes);
+
+    if (decodedImage != null) {
+      final targetWidth = decodedImage.width - (decodedImage.width*.20).toInt(); // 박스의 너비
+      final targetHeight = decodedImage.height - (decodedImage.height*.46).toInt(); // 박스의 높이 //(targetWidth / aspectRatio).toInt();
+      final startX = (decodedImage.width - targetWidth) ~/ 1.9; // 뒤의 숫자의 커질 수록 경계가 좌로 이동
+      final startY = (decodedImage.height - targetHeight) ~/ 1.35; // 뒤의 숫자가 커질 수록 경계가 상으로 이동, 뒤의 숫자가 작아질 수록 경계가 하로 이동
+      return img.copyCrop(decodedImage, startX, startY, targetWidth, targetHeight);
+    } else {
+      throw Exception('이미지를 읽을 수 없습니다.');
+    }
+  }
+
   String? apiResult;
+  String? imagePath;
 
   @override
   Widget build(BuildContext context) {
@@ -184,37 +265,259 @@ class _MyHomePageState extends State<MyHomePage> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
-            Container(
-              width: 300,
-              height: 440,
-              child: selectedImage != null
-                  ? Image.file(
-                selectedImage!,
-                width: 300,
-                height: 440,
-                fit: BoxFit.cover,
-              )
-                  : _initializeControllerFuture == null
-                  //|| !_controller!.value.isInitialized // 이 부분이 주석처리 안되어 있으면
-                  ? CircularProgressIndicator()
-                  : FutureBuilder<void>(
-                future: _initializeControllerFuture,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState ==
-                      ConnectionState.done) {
-                    return AspectRatio(
-                        aspectRatio: _controller!.value.previewSize!.height /
-                            _controller!.value.previewSize!.width, // _controller!.value.previewSize!.aspectRatio,
-                        child: CameraPreview(_controller!),
-                    ); //CameraPreview(_controller!);
-                  } else {
-                    return Center(
-                      child: Text('프리뷰 준비 중...'),
-                    );
-                  }
-                },
-              ),
+            Stack(
+              children: <Widget>[
+                Container(
+                  width: 300,
+                  height: 440,
+                  child: () {
+                    if (selectedImage != null) {
+                      return Image.file(
+                        selectedImage!,
+                        width: 300,
+                        height: 440,
+                        fit: BoxFit.cover,
+                      );
+                    } else if (_initializeControllerFuture == null) {
+                      // || !_controller!.value.isInitialized // 이 부분이 주석처리 안되어 있으면
+                      return CircularProgressIndicator();
+                    } else {
+                      return FutureBuilder<void>(
+                        future: _initializeControllerFuture,
+                        builder: (context, snapshot) {
+                          if (snapshot.connectionState == ConnectionState.done) {
+                            return AspectRatio(
+                              aspectRatio: _controller!.value.previewSize!.height /
+                                  _controller!.value.previewSize!.width,
+                              // _controller!.value.previewSize!.aspectRatio,
+                              child: CameraPreview(_controller!),
+                            );
+                          } else {
+                            return Center(
+                              child: Text('프리뷰 준비 중...'),
+                            );
+                          }
+                        },
+                      );
+                    }
+                  }(),
+
+
+
+                  // child:
+                  // selectedImage != null
+                  //     ? Image.file(
+                  //   selectedImage!,
+                  //   width: 300,
+                  //   height: 440,
+                  //   fit: BoxFit.cover,
+                  // )
+                  //     : _initializeControllerFuture == null
+                  //     //|| !_controller!.value.isInitialized // 이 부분이 주석처리 안되어 있으면
+                  //     ? CircularProgressIndicator()
+                  //     : FutureBuilder<void>(
+                  //   future: _initializeControllerFuture,
+                  //   builder: (context, snapshot) {
+                  //     if (snapshot.connectionState ==
+                  //         ConnectionState.done) {
+                  //       return AspectRatio(
+                  //           aspectRatio: _controller!.value.previewSize!.height /
+                  //               _controller!.value.previewSize!.width, // _controller!.value.previewSize!.aspectRatio,
+                  //           child: CameraPreview(_controller!),
+                  //       ); //CameraPreview(_controller!);
+                  //     } else {
+                  //       return Center(
+                  //         child: Text('프리뷰 준비 중...'),
+                  //       );
+                  //     }
+                  //   },
+                  // ),
+                ),
+                // 다른 위젯들 추가
+
+                // 카메라 가림용
+                Positioned(
+                  top: 0, // 화면 최상단
+                  left: 0, // 좌측 화면 끝
+                  right: 0, // 우측 화면 끝
+                  child: Container(
+                    width: double.infinity, // 가로폭을 화면 전체로 설정
+                    height: 150, // 높이를 200으로 설정
+                    color: Colors.white, // 배경색을 흰색으로 설정
+                  ),
+                ),
+                Positioned(
+                  //top: , // 화면 최상단
+                  left: 0, // 좌측 화면 끝
+                  right: 0, // 우측 화면 끝
+                  bottom: 0,
+                  child: Container(
+                    width: double.infinity, // 가로폭을 화면 전체로 설정
+                    height: 50, // 높이를 200으로 설정
+                    color: Colors.white, // 배경색을 흰색으로 설정
+                  ),
+                ),
+                Positioned(
+                  top: 0, // 화면 최상단
+                  //left: 0, // 좌측 화면 끝
+                  right: 0, // 우측 화면 끝
+                  bottom: 0,
+                  child: Container(
+                    width: 25, //double.infinity, // 가로폭을 화면 전체로 설정
+                    height: double.infinity, //50, // 높이를 200으로 설정
+                    color: Colors.white, // 배경색을 흰색으로 설정
+                  ),
+                ),
+                Positioned(
+                  top: 0, // 화면 최상단
+                  left: 0, // 좌측 화면 끝
+                  //right: 0, // 우측 화면 끝
+                  bottom: 0,
+                  child: Container(
+                    width: 25, //double.infinity, // 가로폭을 화면 전체로 설정
+                    height: double.infinity, //50, // 높이를 200으로 설정
+                    color: Colors.white, // 배경색을 흰색으로 설정
+                  ),
+                ),
+
+              ],
             ),
+            SizedBox(height: 20.0),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ElevatedButton(
+                  onPressed: () async { // 비동기 함수로 변경
+                    if (selectedImage != null) {
+                      final size = await getImageSize(selectedImage!.path); // await로 비동기 작업을 기다림
+                      print('이미지 가로: ${size.width}, 세로: ${size.height}');
+                    } else {
+                      print('이미지가 선택되지 않았습니다.');
+                    }
+                  },
+                  child: Text('이미지 크기 가져오기'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    try {
+                      final aspectRatio = 1.0 ;// 16 / 9; // 원하는 가로 대 세로 비율
+                      final croppedImage = await cropImage(selectedImage!.path, aspectRatio);
+
+                      if (croppedImage != null) {
+                        // 여기에서 croppedImage를 사용하거나 저장할 수 있습니다.
+                        // 예: File로 저장
+                        // final croppedFile = File('경로/저장할/파일명.jpg');
+                        // await croppedFile.writeAsBytes(img.encodeJpg(croppedImage));
+
+                        print('이미지가 성공적으로 잘렸습니다.');
+                        showDialog(
+                          context: context,
+                          builder: (BuildContext context) {
+                            return AlertDialog(
+                              content: Image.memory(Uint8List.fromList(img.encodeJpg(croppedImage))),
+                              actions: [
+                                ElevatedButton(
+                                  onPressed: () {
+                                    Navigator.of(context).pop(); // 경고창 닫기
+                                  },
+                                  child: Text('닫기'),
+                                ),
+                              ],
+                            );
+                          },
+                        );
+                      } else {
+                        print('이미지 잘라내기 실패: 이미지를 읽을 수 없습니다.');
+                      }
+                    } catch (e) {
+                      print('이미지 잘라내기 동안 오류가 발생했습니다: $e');
+                    }
+                  },
+                  child: Text('이미지 잘라내기'),
+                )
+              ],
+            ),
+
+            // ElevatedButton(
+            //     onPressed: () {
+            //       // 이미지 가로 세로 사이즈 알아내기
+            //       final size = getImageSize(imagePath);
+            //       print('이미지 가로: ${size.width}, 세로: ${size.height}');
+            //
+            //       // 이미지를 원하는 비율로 자르기
+            //       final croppedImage = cropImage(imagePath, 2.0); // 2:1 비율로 자르기
+            //       // 자른 이미지를 보여줄 수 있는 방법은 여러 가지입니다. 예를 들어, Image 위젯을 사용하거나 다른 방법을 선택할 수 있습니다.
+            //     },
+            //     child: Text('이미지 자르기'),
+            // ),
+
+            /// 컨테이너를 흰색 위젯으로 가려서, 프리뷰 이미지를 제한하고자 함. 위 스택 부분으로 이 부분 옮겨짐
+            // Container(
+            //   width: 300,
+            //   height: 440,
+            //   child: () {
+            //     if (selectedImage != null) {
+            //       return Image.file(
+            //         selectedImage!,
+            //         width: 300,
+            //         height: 440,
+            //         fit: BoxFit.cover,
+            //       );
+            //     } else if (_initializeControllerFuture == null) {
+            //       // || !_controller!.value.isInitialized // 이 부분이 주석처리 안되어 있으면
+            //       return CircularProgressIndicator();
+            //     } else {
+            //       return FutureBuilder<void>(
+            //         future: _initializeControllerFuture,
+            //         builder: (context, snapshot) {
+            //           if (snapshot.connectionState == ConnectionState.done) {
+            //             return AspectRatio(
+            //               aspectRatio: _controller!.value.previewSize!.height /
+            //                   _controller!.value.previewSize!.width,
+            //               // _controller!.value.previewSize!.aspectRatio,
+            //               child: CameraPreview(_controller!),
+            //             );
+            //           } else {
+            //             return Center(
+            //               child: Text('프리뷰 준비 중...'),
+            //             );
+            //           }
+            //         },
+            //       );
+            //     }
+            //   }(),
+            //
+            //
+            //   /// : ? 으로 되어 있어서 이를 if else 문으로 바꾸고, 위에 적용한 후 아래는 주석 처리함
+            //   // child:
+            //   // selectedImage != null
+            //   //     ? Image.file(
+            //   //   selectedImage!,
+            //   //   width: 300,
+            //   //   height: 440,
+            //   //   fit: BoxFit.cover,
+            //   // )
+            //   //     : _initializeControllerFuture == null
+            //   //     //|| !_controller!.value.isInitialized // 이 부분이 주석처리 안되어 있으면
+            //   //     ? CircularProgressIndicator()
+            //   //     : FutureBuilder<void>(
+            //   //   future: _initializeControllerFuture,
+            //   //   builder: (context, snapshot) {
+            //   //     if (snapshot.connectionState ==
+            //   //         ConnectionState.done) {
+            //   //       return AspectRatio(
+            //   //           aspectRatio: _controller!.value.previewSize!.height /
+            //   //               _controller!.value.previewSize!.width, // _controller!.value.previewSize!.aspectRatio,
+            //   //           child: CameraPreview(_controller!),
+            //   //       ); //CameraPreview(_controller!);
+            //   //     } else {
+            //   //       return Center(
+            //   //         child: Text('프리뷰 준비 중...'),
+            //   //       );
+            //   //     }
+            //   //   },
+            //   // ),
+            // ),
             ElevatedButton(
               onPressed: () async {
                 try {
@@ -247,19 +550,24 @@ class _MyHomePageState extends State<MyHomePage> {
               },
               child: Text(buttonText),
             ),
-            ElevatedButton(
-              onPressed: pickImage,
-              child: Text('이미지 선택'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                String? result = await callFastAPI();
-                setState(() {
-                  apiResult = result;
-                });
-                print(result);
-              },
-              child: Text('FastAPI 호출'),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ElevatedButton(
+                  onPressed: pickImage,
+                  child: Text('이미지 선택'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    String? result = await callFastAPI();
+                    setState(() {
+                      apiResult = result;
+                    });
+                    print(result);
+                  },
+                  child: Text('FastAPI 호출'),
+                ),
+              ],
             ),
             if (apiResult != null)
               Text(
